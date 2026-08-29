@@ -1,6 +1,6 @@
 // ============================================================
 // worker.js (Cloudflare Worker)
-// 财搭子 MCP 行情服务代理 (兼容原 QMT Flask API 格式)
+// 财搭子 MCP 行情服务代理   (兼容原 QMT Flask API 格式)
 // ============================================================
 
 export default {
@@ -415,3 +415,4 @@ function jsonResponse(data, status = 200, ttl = 0) {
 function errorResponse(detail, status = 400) {
   return jsonResponse({ detail }, status);
 }
+
