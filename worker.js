@@ -203,7 +203,7 @@ function convertHistoryItemToLegacy(item, preferredTradeDate) {
   let prevClose = bars[0].prev_close !== undefined ? parseFloat(bars[0].prev_close) : null;
   const result = [];
   let cumulativeAmount = 0.0;
-  let cumulativeVolume = 0.0;
+  let cumulativeVolumeShares = 0.0; // 股，仅用于均价
   let isFirst = true;
   for (const bar of bars) {
     const barTime = String(bar.bar_time).replace("Z", "+00:00");
@@ -219,17 +219,21 @@ function convertHistoryItemToLegacy(item, preferredTradeDate) {
     const close = parseFloat(bar.close);
     if (isNaN(close)) continue;
     const price = isFirst && prevClose !== null ? prevClose : close;
-    const volume = parseFloat(bar.volume || 0);
+    const volumeShares = parseFloat(bar.volume || 0); // 原始：股
+    const volumeHands = volumeShares / 100; // 输出：手
     const amount = parseFloat(bar.amount || 0);
     cumulativeAmount += amount;
-    cumulativeVolume += volume;
-    const avgPrice = cumulativeVolume > 0 ? parseFloat((cumulativeAmount / cumulativeVolume).toFixed(6)) : price;
+    cumulativeVolumeShares += volumeShares;
+    const avgPrice =
+      cumulativeVolumeShares > 0
+        ? parseFloat((cumulativeAmount / cumulativeVolumeShares).toFixed(6))
+        : price;
     result.push({
       date: dateStr,
       time: timeStr,
       price: price,
       avg_price: avgPrice,
-      volume: volume,
+      volume: volumeHands, // 手
     });
     isFirst = false;
   }
