@@ -1,0 +1,5 @@
+{
+  "name": "qmtmcp",
+  "main": "worker.js",
+  "compatibility_date": "2025-08-28"
+}
