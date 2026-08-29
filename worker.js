@@ -196,22 +196,37 @@ function convertHistoryItemToLegacy(item, preferredTradeDate) {
     const target = String(preferredTradeDate).replace(/-/g, "");
     selectedDay = days.find((d) => String(d.trade_date).replace(/-/g, "") === target);
   }
-  if (!selectedDay) selectedDay = days[days.length - 1]; // Fallback to last day
+  if (!selectedDay) selectedDay = days[days.length - 1];
   let bars = selectedDay.bars || [];
   if (!bars.length) return null;
   bars = bars.sort((a, b) => String(a.bar_time).localeCompare(String(b.bar_time)));
   let prevClose = bars[0].prev_close !== undefined ? parseFloat(bars[0].prev_close) : null;
   const result = [];
   let cumulativeAmount = 0.0;
-  let cumulativeVolumeShares = 0.0; // 股，仅用于均价
+  let cumulativeVolumeShares = 0.0;
   let isFirst = true;
+
+  const dateFmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const timeFmt = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+
   for (const bar of bars) {
     const barTime = String(bar.bar_time).replace("Z", "+00:00");
     let dateStr, timeStr;
     try {
       const dt = new Date(barTime);
-      dateStr = dt.toISOString().split("T")[0];
-      timeStr = dt.toISOString().split("T")[1].substring(0, 8);
+      dateStr = dateFmt.format(dt); // YYYY-MM-DD（上海）
+      timeStr = timeFmt.format(dt); // HH:MM:SS（上海）
     } catch (e) {
       dateStr = barTime.substring(0, 10);
       timeStr = barTime.substring(11, 19);
@@ -219,8 +234,8 @@ function convertHistoryItemToLegacy(item, preferredTradeDate) {
     const close = parseFloat(bar.close);
     if (isNaN(close)) continue;
     const price = isFirst && prevClose !== null ? prevClose : close;
-    const volumeShares = parseFloat(bar.volume || 0); // 原始：股
-    const volumeHands = volumeShares / 100; // 输出：手
+    const volumeShares = parseFloat(bar.volume || 0);
+    const volumeHands = volumeShares / 100;
     const amount = parseFloat(bar.amount || 0);
     cumulativeAmount += amount;
     cumulativeVolumeShares += volumeShares;
@@ -233,7 +248,7 @@ function convertHistoryItemToLegacy(item, preferredTradeDate) {
       time: timeStr,
       price: price,
       avg_price: avgPrice,
-      volume: volumeHands, // 手
+      volume: volumeHands,
     });
     isFirst = false;
   }
