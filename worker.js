@@ -329,21 +329,24 @@ function deduplicateSymbols(symbols) {
   return res;
 }
 
+/** 上海时区当前日期，格式 YYYYMMDD */
 function getBeijingToday() {
-  const date = new Date(new Date().getTime() + 8 * 3600 * 1000); // UTC+8
-  return date.toISOString().replace(/-/g, "").substring(0, 8);
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  // en-CA 得到 YYYY-MM-DD
+  return fmt.format(new Date()).replace(/-/g, "");
 }
 
+/** 兼容旧调用：直接返回上海时区今天，由上游 API 处理最近交易日 */
 function getLastTradeDate() {
-  const now = new Date(new Date().getTime() + 8 * 3600 * 1000);
-  const weekday = now.getUTCDay(); // 0 is Sunday
-  let daysBack = 1;
-  if (weekday === 0) daysBack = 2; // Sun -> Fri
-  else if (weekday === 1) daysBack = 3; // Mon -> Fri
-  else if (weekday === 6) daysBack = 1; // Sat -> Fri
-  now.setUTCDate(now.getUTCDate() - daysBack);
-  return now.toISOString().replace(/-/g, "").substring(0, 8);
+  return getBeijingToday();
 }
+
+
 
 function jsonResponse(data, status = 200, ttl = 0) {
   const headers = {
