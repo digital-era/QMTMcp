@@ -1,7 +1,7 @@
 // ============================================================
 // worker.js (Cloudflare Worker)
 // 财搭子 MCP 行情服务代理   (兼容原 QMT Flask API 格式)
-// Streamable HTTP MCP 客户端
+// 使用官方 REST API：POST {base}/api/tools/call
 // ============================================================
 export default {
   async fetch(request, env, ctx) {
@@ -34,7 +34,7 @@ export default {
       }
     }
     return errorResponse("Not found", 404);
-  }
+  },
 };
 
 // ============================================================
@@ -88,12 +88,11 @@ async function handleBatchQuery(request, env, ctx) {
   }
   if (codesInfo.length === 0) return errorResponse("No valid codes", 400);
   // 为 POST 请求构造虚拟 GET Cache Key (Cloudflare Cache API 只能 match GET 请求)
-  const sortedCodes = [...new Set(codesInfo.map(c => c.orig))].sort().join(",");
+  const sortedCodes = [...new Set(codesInfo.map((c) => c.orig))].sort().join(",");
   const fakeCacheUrl = new URL(request.url);
   fakeCacheUrl.searchParams.set("codes", sortedCodes);
   fakeCacheUrl.searchParams.set("type", type);
   if (date) fakeCacheUrl.searchParams.set("date", date);
-
   const cacheKey = new Request(fakeCacheUrl.toString(), { method: "GET" });
   const cache = caches.default;
   const cachedResponse = await cache.match(cacheKey);
@@ -123,15 +122,19 @@ async function handleBatchQuery(request, env, ctx) {
 }
 
 // ============================================================
-// 数据获取层：MCP 封装
+// 数据获取层：MCP / REST 封装
 // ============================================================
 async function fetchPriceBatch(codesInfo, env) {
-  const symbols = deduplicateSymbols(codesInfo.map(c => c.orig));
+  const symbols = deduplicateSymbols(codesInfo.map((c) => c.orig));
   if (!symbols.length) return {};
-  const mcpResult = await callMcpTool("get_a_share_realtime_1m_price", {
-    symbols,
-    include_incomplete: true
-  }, env);
+  const mcpResult = await callMcpTool(
+    "get_a_share_realtime_1m_price",
+    {
+      symbols,
+      include_incomplete: true,
+    },
+    env,
+  );
   const items = mcpResult?.data?.items || [];
   const results = {};
   const symbolMap = {};
@@ -142,7 +145,6 @@ async function fetchPriceBatch(codesInfo, env) {
   for (const item of items) {
     const mapping = symbolMap[item.symbol];
     if (!mapping || !item.bar) continue;
-
     const latestPrice = parseFloat(item.bar.close);
     const prevClose = parseFloat(item.bar.prev_close);
     if (isNaN(latestPrice) || isNaN(prevClose)) continue;
@@ -155,14 +157,14 @@ async function fetchPriceBatch(codesInfo, env) {
       changeAmount: changeAmount,
       source: "caidazi_mcp_cf",
       currency: mapping.currency,
-      dailydata: null
+      dailydata: null,
     };
   }
   return results;
 }
 
 async function fetchIntradayBatch(codesInfo, endDate, env) {
-  const symbols = deduplicateSymbols(codesInfo.map(c => c.orig));
+  const symbols = deduplicateSymbols(codesInfo.map((c) => c.orig));
   if (!symbols.length) return {};
   const args = { symbols, trading_days: 2 };
   if (endDate) args.end_date = String(endDate).replace(/-/g, "");
@@ -192,14 +194,13 @@ function convertHistoryItemToLegacy(item, preferredTradeDate) {
   let selectedDay = null;
   if (preferredTradeDate) {
     const target = String(preferredTradeDate).replace(/-/g, "");
-    selectedDay = days.find(d => String(d.trade_date).replace(/-/g, "") === target);
+    selectedDay = days.find((d) => String(d.trade_date).replace(/-/g, "") === target);
   }
   if (!selectedDay) selectedDay = days[days.length - 1]; // Fallback to last day
   let bars = selectedDay.bars || [];
   if (!bars.length) return null;
   bars = bars.sort((a, b) => String(a.bar_time).localeCompare(String(b.bar_time)));
   let prevClose = bars[0].prev_close !== undefined ? parseFloat(bars[0].prev_close) : null;
-
   const result = [];
   let cumulativeAmount = 0.0;
   let cumulativeVolume = 0.0;
@@ -217,14 +218,18 @@ function convertHistoryItemToLegacy(item, preferredTradeDate) {
     }
     const close = parseFloat(bar.close);
     if (isNaN(close)) continue;
-    const price = (isFirst && prevClose !== null) ? prevClose : close;
+    const price = isFirst && prevClose !== null ? prevClose : close;
     const volume = parseFloat(bar.volume || 0);
     const amount = parseFloat(bar.amount || 0);
     cumulativeAmount += amount;
     cumulativeVolume += volume;
     const avgPrice = cumulativeVolume > 0 ? parseFloat((cumulativeAmount / cumulativeVolume).toFixed(6)) : price;
     result.push({
-      date: dateStr, time: timeStr, price: price, avg_price: avgPrice, volume: volume
+      date: dateStr,
+      time: timeStr,
+      price: price,
+      avg_price: avgPrice,
+      volume: volume,
     });
     isFirst = false;
   }
@@ -232,165 +237,59 @@ function convertHistoryItemToLegacy(item, preferredTradeDate) {
 }
 
 // ============================================================
-// Streamable HTTP MCP 客户端（兼容现代 MCP 规范）
+// 财搭子 REST API 客户端（与官方 @caidazi/mcp 一致）
+// POST {baseUrl}/api/tools/call
+// body: { tool_name, parameters }
 // ============================================================
 async function callMcpTool(toolName, args, env) {
-  const mcpUrl = (env.CAIDAZI_MCP_URL || "https://mcp.zhicepilot.com/").replace(/\/?$/, "/");
+  const baseUrl = (env.CAIDAZI_MCP_URL || env.CAIDAZI_BASE_URL || "https://mcp.zhicepilot.com").replace(
+    /\/+$/,
+    "",
+  );
   const apiKey = env.CAIDAZI_API_KEY;
-  if (!apiKey) throw new Error("CAIDAZI_API_KEY is not configured in Cloudflare environment.");
-
-  const baseHeaders = {
-    Authorization: `Bearer ${apiKey}`,
-    "Content-Type": "application/json",
-    Accept: "application/json, text/event-stream",
-  };
-
-  // 1) initialize（获取可选 session）
-  const initId = crypto.randomUUID();
-  let sessionId = null;
-  try {
-    const initRes = await fetch(mcpUrl, {
-      method: "POST",
-      headers: baseHeaders,
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: initId,
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: { name: "cf-worker-qmtmcp", version: "1.0.0" },
-        },
-      }),
-    });
-    sessionId = initRes.headers.get("mcp-session-id") || initRes.headers.get("Mcp-Session-Id");
-    // 不强制要求 initialize 成功，部分服务可直接 tools/call
-    if (initRes.ok) {
-      // 可选：发送 initialized 通知（部分服务需要）
-      const notifyHeaders = { ...baseHeaders };
-      if (sessionId) notifyHeaders["Mcp-Session-Id"] = sessionId;
-      await fetch(mcpUrl, {
-        method: "POST",
-        headers: notifyHeaders,
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          method: "notifications/initialized",
-        }),
-      }).catch(() => {});
-    }
-  } catch (e) {
-    console.warn("MCP initialize warning:", e.message);
+  if (!apiKey) {
+    throw new Error("CAIDAZI_API_KEY is not configured in Cloudflare environment.");
   }
 
-  // 2) tools/call
-  const rpcId = crypto.randomUUID();
-  const callHeaders = { ...baseHeaders };
-  if (sessionId) callHeaders["Mcp-Session-Id"] = sessionId;
-
-  const callRes = await fetch(mcpUrl, {
+  const url = `${baseUrl}/api/tools/call`;
+  const res = await fetch(url, {
     method: "POST",
-    headers: callHeaders,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: rpcId,
-      method: "tools/call",
-      params: { name: toolName, arguments: args },
+      tool_name: toolName,
+      parameters: args || {},
     }),
   });
 
-  if (!callRes.ok) {
-    const errText = await callRes.text().catch(() => "");
-    throw new Error(`MCP Server Error: ${callRes.status}${errText ? " " + errText.slice(0, 200) : ""}`);
-  }
-
-  const contentType = (callRes.headers.get("content-type") || "").toLowerCase();
-
-  // 3a) 纯 JSON 响应
-  if (contentType.includes("application/json")) {
-    const parsed = await callRes.json();
-    return extractMcpResult(parsed, rpcId, toolName);
-  }
-
-  // 3b) SSE 流响应（Streamable HTTP 可能用 text/event-stream）
-  if (contentType.includes("text/event-stream") && callRes.body) {
-    const reader = callRes.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() || "";
-        for (const part of parts) {
-          const dataLines = part
-            .split("\n")
-            .filter((l) => l.startsWith("data:"))
-            .map((l) => l.slice(5).trim());
-          if (!dataLines.length) continue;
-          const dataStr = dataLines.join("");
-          if (!dataStr || dataStr === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(dataStr);
-            // 匹配我们的 id，或取最后一个带 result/error 的消息
-            if (parsed.id === rpcId || parsed.result !== undefined || parsed.error) {
-              return extractMcpResult(parsed, rpcId, toolName);
-            }
-          } catch (_) {
-            /* 忽略非 JSON 行 */
-          }
-        }
-      }
-    } finally {
-      reader.cancel().catch(() => {});
-    }
-    throw new Error(`MCP Tool ${toolName} failed: SSE stream closed without result`);
-  }
-
-  // 3c) 其它：尝试按 JSON 解析
-  const text = await callRes.text();
+  const text = await res.text();
+  let body;
   try {
-    const parsed = JSON.parse(text);
-    return extractMcpResult(parsed, rpcId, toolName);
-  } catch (_) {
-    throw new Error(`MCP Tool ${toolName} failed: unexpected response: ${text.slice(0, 200)}`);
-  }
-}
-
-/** 从 JSON-RPC 响应中提取业务结果（兼容 content[].text / structuredContent） */
-function extractMcpResult(parsed, rpcId, toolName) {
-  if (parsed.error) {
-    throw new Error(parsed.error.message || `MCP Tool Error (${toolName})`);
-  }
-  // 兼容：部分流式消息没有 id
-  const result = parsed.result;
-  if (result === undefined || result === null) {
-    throw new Error(`MCP Tool ${toolName} returned empty result`);
+    body = text ? JSON.parse(text) : {};
+  } catch {
+    body = { raw: text };
   }
 
-  // MCP 标准：result.content 为 Content 数组
-  let content = result.content ?? result;
-  if (Array.isArray(content)) {
-    for (const item of content) {
-      if (item && item.type === "text" && item.text) {
-        try {
-          return JSON.parse(item.text);
-        } catch (_) {
-          // 非 JSON 文本，继续尝试其它字段
-        }
-      }
-      if (item && item.text) {
-        try {
-          return JSON.parse(item.text);
-        } catch (_) {}
-      }
-    }
+  if (!res.ok) {
+    const msg =
+      (typeof body === "object" && (body.detail || body.error || body.message)) ||
+      (typeof text === "string" ? text.slice(0, 200) : "") ||
+      res.statusText;
+    throw new Error(`MCP Server Error: ${res.status} ${msg}`);
   }
-  if (result.structuredContent) return result.structuredContent;
-  // 有的实现直接把业务数据放在 result 上
-  if (result.data !== undefined) return result;
-  return result;
+
+  if (body && body.success === false) {
+    throw new Error(body.error || `Tool ${toolName} failed`);
+  }
+
+  // 官方客户端优先使用 body.result
+  if (body && Object.prototype.hasOwnProperty.call(body, "result")) {
+    return body.result;
+  }
+  return body;
 }
 
 // ============================================================
@@ -442,7 +341,6 @@ function getLastTradeDate() {
   if (weekday === 0) daysBack = 2; // Sun -> Fri
   else if (weekday === 1) daysBack = 3; // Mon -> Fri
   else if (weekday === 6) daysBack = 1; // Sat -> Fri
-
   now.setUTCDate(now.getUTCDate() - daysBack);
   return now.toISOString().replace(/-/g, "").substring(0, 8);
 }
