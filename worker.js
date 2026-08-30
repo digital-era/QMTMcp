@@ -125,33 +125,99 @@ async function handleBatchQuery(request, env, ctx) {
 // 数据获取层：MCP / REST 封装
 // ============================================================
 async function fetchPriceBatch(codesInfo, env) {
+  // 尽量保持原来的符号列表构建方式
   const symbols = deduplicateSymbols(codesInfo.map((c) => c.orig));
   if (!symbols.length) return {};
+
+  // ★ 关键点1：换成 get_real_time_record
+  // 注意：实际参数名以 MCP tools/list 返回的 schema 为准
+  // 常见可能是 symbols / codes / symbol_list 等，这里先按最接近原写法的 symbols 传
   const mcpResult = await callMcpTool(
-    "get_a_share_realtime_1m_price",
+    "get_real_time_record",
     {
-      symbols,
-      include_incomplete: true,
+      symbols,          // 如果官方 schema 是 codes，就改成 codes: symbols
+      // 如果支持批量，直接传数组；如果只支持单个，就需要循环调用
     },
     env,
   );
-  const items = mcpResult?.data?.items || [];
+
+  // ★ 替换点2：解析 get_real_time_record 的返回结构
+  // 不同版本可能返回 data.items / data.records / result 直接是数组，需要兼容
+  const items =
+    mcpResult?.data?.items ||
+    mcpResult?.data?.records ||
+    mcpResult?.items ||
+    mcpResult?.records ||
+    (Array.isArray(mcpResult) ? mcpResult : []) ||
+    [];
+
   const results = {};
   const symbolMap = {};
   for (const c of codesInfo) {
     const norm = normalizeAShareCode(c.orig);
     if (norm && !symbolMap[norm]) symbolMap[norm] = c;
   }
+
   for (const item of items) {
-    const mapping = symbolMap[item.symbol];
-    if (!mapping || !item.bar) continue;
-    const latestPrice = parseFloat(item.bar.close);
-    const prevClose = parseFloat(item.bar.prev_close);
-    if (isNaN(latestPrice) || isNaN(prevClose)) continue;
-    const changeAmount = latestPrice - prevClose;
-    const changePercent = prevClose ? parseFloat(((changeAmount / prevClose) * 100).toFixed(6)) : 0.0;
+    // 兼容多种字段命名
+    const symbol =
+      item.symbol ||
+      item.code ||
+      item.stock_code ||
+      item.ticker ||
+      item.sec_code;
+
+    const mapping = symbolMap[symbol] || symbolMap[normalizeAShareCode(symbol)];
+    if (!mapping) continue;
+
+    // 最新价（常见字段名）
+    const latestPrice = parseFloat(
+      item.price ??
+      item.last ??
+      item.last_price ??
+      item.close ??
+      item.latestPrice ??
+      item.latest_price
+    );
+
+    // 昨收
+    const prevClose = parseFloat(
+      item.prev_close ??
+      item.pre_close ??
+      item.yesterday_close ??
+      item.last_close ??
+      item.prevClose
+    );
+
+    if (isNaN(latestPrice)) continue;
+
+    // 涨跌额 / 涨跌幅（优先用接口直接返回的，没有再自己算）
+    let changeAmount = parseFloat(
+      item.change ??
+      item.change_amount ??
+      item.changeAmount ??
+      item.ud
+    );
+    let changePercent = parseFloat(
+      item.pct_chg ??
+      item.change_percent ??
+      item.changePercent ??
+      item.percent ??
+      item.pc
+    );
+
+    if (isNaN(changeAmount) && !isNaN(prevClose)) {
+      changeAmount = latestPrice - prevClose;
+    }
+    if (isNaN(changePercent) && !isNaN(prevClose) && prevClose !== 0) {
+      changePercent = parseFloat(((changeAmount / prevClose) * 100).toFixed(6));
+    }
+    if (isNaN(changeAmount)) changeAmount = 0;
+    if (isNaN(changePercent)) changePercent = 0;
+
+    // ★ 保持原来对外返回结构完全一致
     results[mapping.orig] = {
-      name: item.name || mapping.orig,
+      name: item.name || item.stock_name || mapping.orig,
       latestPrice: latestPrice,
       changePercent: changePercent,
       changeAmount: changeAmount,
@@ -160,6 +226,7 @@ async function fetchPriceBatch(codesInfo, env) {
       dailydata: null,
     };
   }
+
   return results;
 }
 
