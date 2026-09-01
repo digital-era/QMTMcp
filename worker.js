@@ -331,7 +331,16 @@ function convertCode(code) {
 
 function normalizeAShareCode(code) {
   const { qmtCode, currency } = convertCode(code);
-  if (currency === "CNY" && /^\d{6}\.(SH|SZ|BJ)$/.test(qmtCode)) return qmtCode;
+  if (!qmtCode) return null;
+
+  // A股
+  if (currency === "CNY" && /^\d{6}\.(SH|SZ|BJ)$/.test(qmtCode)) {
+    return qmtCode;
+  }
+  // 港股支持
+  if (currency === "HKD" && /^\d{5}\.HK$/.test(qmtCode)) {
+    return qmtCode;
+  }
   return null;
 }
 
